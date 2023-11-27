@@ -1,0 +1,167 @@
+---
+title: "ENVS_6452_A3"
+author: "cc"
+date: "2023-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r} 
+###Load required libraries
+library(dada2) 
+library(phyloseq)
+library(Biostrings)
+library(ggplot2)
+library(phyloseq)
+library(randomcoloR)
+library(tidyverse)
+```
+
+```{r}
+#Create a graph of the relative abundance of phyla in the hummock, trough, and negative control.
+#set working directory and create object that is set to the folder within working dir that has files
+setwd("C:/Users/charl/OneDrive/GuelphMasters/ENVS_BioInf/ENVS6452_A3_files/")
+path <- "C:/Users/charl/OneDrive/GuelphMasters/ENVS_BioInf/ENVS6452_A3_files" 
+#rename files
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+```{r}
+##time to inspect the quality of the data 
+plotQualityProfile(fnFs) 
+plotQualityProfile(fnRs)
+```
+##we are cutting off forward reads at 250bp and reverse reads at 200bp based on the quality profiles
+
+```{r}
+#create objects and rename files
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(250,200),
+                     maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE, compress=TRUE, multithread=FALSE)
+```
+
+```{r}
+#Let's estimate the errors in the sequences
+errF <- learnErrors(filtFs, multithread=FALSE) #this takes basically forever - beware.
+errR <- learnErrors(filtRs, multithread=FALSE)
+plotErrors(errF, nominalQ=TRUE)
+```
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=FALSE)
+dadaRs <- dada(filtRs, err=errR, multithread=FALSE)
+```
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+seqtab <- makeSequenceTable(mergers) 
+table(nchar(getSequences(seqtab)))
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=FALSE, verbose=TRUE)
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+```{r}
+##follow what cuts I made and where while cleaning up the dataset
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+```
+
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "C:/Users/charl/OneDrive/Desktop/Working R/BIOINF_Class_Oct19/MiSeq_SOP/silva_nr99_v138.1_train_set.fa.gz", multithread=FALSE)
+#using training datasets from the dada2 pipeline
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+```
+
+```{r}
+write.csv(taxa, file = "C:/Users/charl/OneDrive/GuelphMasters/ENVS_BioInf/ENVS6452_A3_files/A3_taxa.csv")
+write.csv(seqtab.nochim, file = "C:/Users/charl/OneDrive/GuelphMasters/ENVS_BioInf/ENVS6452_A3_files/A3_seqtab.nochim.csv")
+
+seqtab.nochim <- read.csv(file = "C:/Users/charl/OneDrive/GuelphMasters/ENVS_BioInf/ENVS6452_A3_files/A3_seqtab.nochim.csv", sep = ',', row.names = 1)
+
+seqtab.nochim <- as.matrix(seqtab.nochim)
+taxa <- as.matrix(taxa)
+flipped_seqtab.nochim <- as.data.frame(t(seqtab.nochim))
+OTU_abundance <- cbind(flipped_seqtab.nochim, taxa)
+```
+
+```{r}
+write.csv (OTU_abundance, file = "C:/Users/charl/OneDrive/GuelphMasters/ENVS_BioInf/ENVS6452_A3_files/A3_OTU_abundance.csv")
+
+sample_ID <- rownames(seqtab.nochim) #create object of row names from seqtab file
+sample_df <- data.frame(sample_ID) #now turn these into a dataframe
+rownames(sample_df) <- sample_ID 
+
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+               sample_data(sample_df),
+               tax_table(taxa)) 
+
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps.table<-psmelt(ps) 
+
+
+n_distinct(OTU_abundance$Phylum) #34 individual Phyla 
+palette <- distinctColorPalette(34)
+
+
+
+Q1_Plot <- ggplot(data = ps.table, mapping = aes (x = sample_ID, y = Abundance))+
+  theme_minimal()+
+  geom_bar(aes(fill = Phylum), stat = "identity", position = "fill")+
+  scale_fill_manual(values = c(palette)) +
+  ggtitle("Relative Abundance of Phyla from Arctic Permafrost Active Layer") +
+  xlab("Sample") + ylab("Relative Abundance") +
+  scale_x_discrete(labels=c("Hummock", "Negative", "Trough"))+
+  theme(legend.title=element_text(hjust = 0.5)) + 
+  theme(legend.title=element_text(size = 10), legend.text=element_text(size = 10, face = "italic"),
+        legend.key.size = unit(0.2, 'cm')) +
+  theme(plot.title=element_text(hjust=0.5)) + theme(plot.title = element_text(size = 10)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(axis.title = element_text(size = 10))
+```
+
+```{r}
+n_distinct(OTU_abundance$Order) #135 individual orders
+order_palette <- distinctColorPalette(135)
+
+Q3_Plot <- ggplot(data = ps.table, mapping = aes (x = sample_ID, y = Abundance))+
+  theme_minimal()+
+  geom_bar(aes(fill = Order), stat = "identity", position = "fill")+
+  scale_fill_manual(values = c(order_palette)) +
+  ggtitle("Relative Abundance of Orders from Arctic Permafrost Active Layer") +
+  xlab("Sample") + ylab("Relative Abundance") +
+  scale_x_discrete(labels=c("Hummock", "Negative", "Trough"))+
+  theme(legend.title=element_text(hjust = 0.5)) + 
+  theme(legend.title=element_text(size = 10), legend.text=element_text(size = 10, face = "italic"),
+        legend.key.size = unit(0.2, 'cm')) +
+  theme(plot.title=element_text(hjust=0.5)) + theme(plot.title = element_text(size = 10)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(axis.title = element_text(size = 10))
+Q3_Plot
+```
+
+```{r}
+Bonus_plot <- ggplot(data = ps.table)+
+  geom_point(aes(x = sample_ID, y = Phylum, size = Abundance, alpha = I(ifelse(Abundance < 1, 0, 1))), colour = "seagreen") +
+  theme_minimal()+
+  ggtitle("Abundance of Phyla from Arctic Permafrost Active Layer") +
+  xlab("Sample") + ylab("Phylym") +
+  theme(axis.text.x = element_text (face = "italic")) +
+  scale_colour_hue(guide = "none") +
+  theme(plot.title=element_text(hjust = 0.5)) +
+  scale_x_discrete(labels=c("Hummock", "Negative", "Trough"))
+
+Bonus_plot
+```
